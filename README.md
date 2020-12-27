@@ -4,8 +4,7 @@ This is a websocket server for StreamSync, google chrome extension.
 
 ### StreamSync
 
-StreamSync is a google chrome extension.
-This enables to sync playback position between Host (browser) and Client (browser).
+StreamSync is a google chrome extension that enables to sync playback position between Host and Client (different browsers).
 
 ### How StreamSync works
 
