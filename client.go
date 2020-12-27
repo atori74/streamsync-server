@@ -172,7 +172,7 @@ func handleFrame(f Frame, c *Client) {
 				c.inSync = true
 
 				sFrame := Frame{
-					Type: "syncStopped",
+					Type: "syncStarted",
 					From: "server",
 				}
 
@@ -190,7 +190,7 @@ func handleFrame(f Frame, c *Client) {
 				c.inSync = false
 
 				sFrame := Frame{
-					Type: "syncStarted",
+					Type: "syncStopped",
 					From: "server",
 				}
 
