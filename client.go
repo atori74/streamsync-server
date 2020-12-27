@@ -164,7 +164,7 @@ func handleFrame(f Frame, c *Client) {
 
 	case "command":
 		if cmd, ok := f.Data.(map[string]interface{})["command"].(string); ok {
-			switch f.Data.(map[string]interface{})["command"].(string) {
+			switch cmd {
 			case "syncStart":
 				if c.inSync {
 					return
@@ -175,6 +175,14 @@ func handleFrame(f Frame, c *Client) {
 					Type: "syncStopped",
 					From: "server",
 				}
+
+				b, err := json.Marshal(sFrame)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				c.send <- b
 			case "syncStop":
 				if !c.inSync {
 					return
@@ -185,6 +193,14 @@ func handleFrame(f Frame, c *Client) {
 					Type: "syncStarted",
 					From: "server",
 				}
+
+				b, err := json.Marshal(sFrame)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				c.send <- b
 			}
 		}
 	}
