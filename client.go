@@ -127,8 +127,11 @@ func (c *Client) hostReader() {
 func handleFrame(f Frame, c *Client) {
 	switch f.Type {
 	case "playbackPostion":
-		position := f.Data["position"]
-		currentTime := f.Data["currentTime"]
+		data := f.Data.(map[string]interface{})
+
+		position := data["position"].(int)
+		currentTime := data["currentTime"].(string)
+		log.Printf("Room: %s, playback: %d, at: %s", c.room.ID, position, currentTime)
 
 		sFrame := f
 		sFrame.From = "server"
@@ -142,7 +145,7 @@ func handleFrame(f Frame, c *Client) {
 		c.room.broadcast <- b
 
 	case "command":
-		switch f.Data["command"] {
+		switch f.Data.(map[string]interface{})["command"].(string) {
 		case "syncStart":
 			if c.inSync {
 				return
