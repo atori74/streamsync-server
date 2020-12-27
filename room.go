@@ -16,6 +16,7 @@ type Room struct {
 	unregister chan *Client
 	open       chan *Client
 	closed     chan bool
+	mediaURL   string
 }
 
 func newRoom() *Room {
