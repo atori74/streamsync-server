@@ -15,5 +15,5 @@ Host can open a room and Client can join it.
 Host send playback position data of video or streaming playing in browser to the room.
 Clients in the same room receive the data and automatically sync the playback position of video or streaming. 
 
-Host and Client have websocket connection with server as long as they in the room.
+Host and Client have websocket connection with server as long as they are in the room.
 
