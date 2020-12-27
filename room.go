@@ -38,12 +38,17 @@ func (r *Room) run() {
 			log.Println("<-open channel")
 			r.host = host
 			log.Println("on open; room id = ", r.ID.String())
-			f := Frame{Data: r.ID.String()}
+			f := Frame{
+				Type: "roomInfo",
+				From: "server",
+				Data: map[string]interface{}{
+					"roomID": r.ID.String(),
+				},
+			}
 			j, err := json.Marshal(f)
 			if err != nil {
-				log.Println("failed to marshal room id")
+				log.Println(err)
 			}
-			log.Println("encoded(decoded) room id: ", string(j))
 			r.host.send <- j
 		case <-r.closed:
 			for client := range r.clients {
@@ -51,8 +56,20 @@ func (r *Room) run() {
 				close(client.send)
 			}
 		case client := <-r.register:
-			log.Println("<-register channel")
 			r.clients[client] = true
+			f := Frame{
+				Type: "newClient",
+				From: "server",
+				Data: map[string]interface{}{
+					"clientCount": len(r.clients),
+				},
+			}
+			j, err := json.Marshal(f)
+			if err != nil {
+				log.Println(err)
+			}
+
+			r.host.send <- j
 		case client := <-r.unregister:
 			if _, ok := r.clients[client]; ok {
 				delete(r.clients, client)

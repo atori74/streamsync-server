@@ -15,10 +15,6 @@
 					}
 				}
 
-				document.getElementById('testButton').onclick = () => {
-					console.log('test');
-				};
-
 				document.getElementById("form").onsubmit = function () {
 					if (!conn) {
 						return false;
@@ -55,8 +51,17 @@
 				};
 
 				document.getElementById("subscribe").onclick = () => {
+					let roomIdInput = document.getElementById("roomID");
+					let roomId = roomIdInput.value;
+					if (roomId == "") {
+						var item = document.createElement("div");
+						item.innerHTML = "<b>RoomID is not valid.</b>";
+						appendLog(item);
+						return
+					}
 					if (window["WebSocket"]) {
-						conn = new WebSocket("ws://" + document.location.host + "/ws");
+						console.log("ws://" + document.location.host + "/join/" + roomId)
+						conn = new WebSocket("ws://" + document.location.host + "/join/" + roomId);
 						conn.onclose = function (evt) {
 							var item = document.createElement("div");
 							item.innerHTML = "<b>Connection closed.</b>";
@@ -119,7 +124,8 @@
 	<body>
 		<button id="open">ルームを開く</button>
 		<button id="subscribe">ルームに参加</button>
-		<button id="testButton">TEST</button>
+		<span>RoomID:</span>
+		<input type="text" id="roomID">
 		<div id="log"></div>
 		<form id="form">
 			<input type="submit" value="Send"/>

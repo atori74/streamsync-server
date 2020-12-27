@@ -77,6 +77,7 @@ func joinRoomHandler(w http.ResponseWriter, r *http.Request) {
 	room, ok := openRooms[rid]
 	if !ok {
 		wsError(w, "invalid room id", http.StatusBadRequest)
+		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
