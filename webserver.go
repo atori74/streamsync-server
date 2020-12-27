@@ -52,7 +52,7 @@ func newRoomHandler(w http.ResponseWriter, r *http.Request) {
 	room := newRoom()
 	openRooms[room.ID.String()] = room
 	go room.run()
-	host := &Client{room: room, conn: conn, send: make(chan []byte)}
+	host := &Client{room: room, conn: conn, send: make(chan []byte), inSync: true}
 	room.open <- host
 
 	go host.hostReader()
@@ -88,7 +88,7 @@ func joinRoomHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &Client{room: room, conn: conn, send: make(chan []byte)}
+	client := &Client{room: room, conn: conn, send: make(chan []byte), inSync: true}
 	room.register <- client
 
 	go client.reader()

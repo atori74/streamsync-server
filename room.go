@@ -77,6 +77,9 @@ func (r *Room) run() {
 			}
 		case message := <-r.broadcast:
 			for client := range r.clients {
+				if !client.inSync {
+					continue
+				}
 				select {
 				case client.send <- message:
 				default:

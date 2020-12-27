@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"log"
 	"time"
@@ -53,8 +52,11 @@ func (c *Client) reader() {
 			}
 			break
 		}
-		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		c.room.broadcast <- message
+
+		var f Frame
+		json.Unmarshal(message, &f)
+
+		handleFrame(f, c)
 	}
 }
 
@@ -138,7 +140,7 @@ func handleFrame(f Frame, c *Client) {
 			log.Println("invalid frame")
 			return
 		}
-		log.Printf("roomID: %s, position: %b, at: %s\n", c.room.ID.String(), position, currentTime)
+		log.Printf("roomID: %s, position: %f, at: %s\n", c.room.ID.String(), position, currentTime)
 
 		url, ok := data["mediaURL"].(string)
 		if !ok {
@@ -161,17 +163,45 @@ func handleFrame(f Frame, c *Client) {
 		c.room.broadcast <- b
 
 	case "command":
-		switch f.Data.(map[string]interface{})["command"].(string) {
-		case "syncStart":
-			if c.inSync {
-				return
+		if cmd, ok := f.Data.(map[string]interface{})["command"].(string); ok {
+			switch cmd {
+			case "syncStart":
+				if c.inSync {
+					return
+				}
+				c.inSync = true
+
+				sFrame := Frame{
+					Type: "syncStarted",
+					From: "server",
+				}
+
+				b, err := json.Marshal(sFrame)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				c.send <- b
+			case "syncStop":
+				if !c.inSync {
+					return
+				}
+				c.inSync = false
+
+				sFrame := Frame{
+					Type: "syncStopped",
+					From: "server",
+				}
+
+				b, err := json.Marshal(sFrame)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				c.send <- b
 			}
-			//hoge
-		case "syncStop":
-			if !c.inSync {
-				return
-			}
-			//hoge
 		}
 	}
 }
