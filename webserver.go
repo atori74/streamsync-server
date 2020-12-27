@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -93,6 +94,20 @@ func joinRoomHandler(w http.ResponseWriter, r *http.Request) {
 	go client.reader()
 	go client.writer()
 
+	f := Frame{
+		From: "server",
+		Type: "joinSuccess",
+		Data: map[string]interface{}{
+			"roomID":   room.ID.String(),
+			"mediaURL": room.mediaURL,
+		},
+	}
+	j, err := json.Marshal(f)
+	if err != nil {
+		log.Println(err)
+	}
+
+	client.send <- j
 }
 
 func wsError(w http.ResponseWriter, msg string, code int) {

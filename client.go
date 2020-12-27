@@ -128,8 +128,26 @@ func handleFrame(f Frame, c *Client) {
 	case "playbackPosition":
 		data := f.Data.(map[string]interface{})
 
-		position := data["position"].(float64)
-		currentTime := data["currentTime"].(string)
+		position, ok := data["position"].(float64)
+		if !ok {
+			log.Println("invalid frame")
+			return
+		}
+		currentTime, ok := data["currentTime"].(string)
+		if !ok {
+			log.Println("invalid frame")
+			return
+		}
+		log.Printf("roomID: %s, position: %b, at: %s\n", c.room.ID.String(), position, currentTime)
+
+		url, ok := data["mediaURL"].(string)
+		if !ok {
+			log.Println("invalid frame")
+			return
+		}
+		if c.room.mediaURL == "" || c.room.mediaURL != url {
+			c.room.mediaURL = url
+		}
 
 		sFrame := f
 		sFrame.From = "server"

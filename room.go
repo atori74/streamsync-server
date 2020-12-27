@@ -16,6 +16,7 @@ type Room struct {
 	unregister chan *Client
 	open       chan *Client
 	closed     chan bool
+	mediaURL   string
 }
 
 func newRoom() *Room {
@@ -35,7 +36,6 @@ func (r *Room) run() {
 	for {
 		select {
 		case host := <-r.open:
-			log.Println("<-open channel")
 			r.host = host
 			log.Println("on open; room id = ", r.ID.String())
 			f := Frame{
