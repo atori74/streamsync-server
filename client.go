@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"log"
 	"time"
@@ -53,8 +52,11 @@ func (c *Client) reader() {
 			}
 			break
 		}
-		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		c.room.broadcast <- message
+
+		var f Frame
+		json.Unmarshal(message, &f)
+
+		handleFrame(f, c)
 	}
 }
 
@@ -161,17 +163,29 @@ func handleFrame(f Frame, c *Client) {
 		c.room.broadcast <- b
 
 	case "command":
-		switch f.Data.(map[string]interface{})["command"].(string) {
-		case "syncStart":
-			if c.inSync {
-				return
+		if cmd, ok := f.Data.(map[string]interface{})["command"].(string); ok {
+			switch f.Data.(map[string]interface{})["command"].(string) {
+			case "syncStart":
+				if c.inSync {
+					return
+				}
+				c.inSync = true
+
+				sFrame := Frame{
+					Type: "syncStopped",
+					From: "server",
+				}
+			case "syncStop":
+				if !c.inSync {
+					return
+				}
+				c.inSync = false
+
+				sFrame := Frame{
+					Type: "syncStarted",
+					From: "server",
+				}
 			}
-			//hoge
-		case "syncStop":
-			if !c.inSync {
-				return
-			}
-			//hoge
 		}
 	}
 }
