@@ -140,7 +140,7 @@ func handleFrame(f Frame, c *Client) {
 			log.Println("invalid frame")
 			return
 		}
-		log.Printf("roomID: %s, position: %b, at: %s\n", c.room.ID.String(), position, currentTime)
+		log.Printf("roomID: %s, position: %f, at: %s\n", c.room.ID.String(), position, currentTime)
 
 		url, ok := data["mediaURL"].(string)
 		if !ok {
