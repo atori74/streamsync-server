@@ -119,19 +119,17 @@ func (c *Client) hostReader() {
 		var f Frame
 		json.Unmarshal(message, &f)
 
-		// frameを使って何かする
-		// handleFrame(f)
+		handleFrame(f, c)
 	}
 }
 
 func handleFrame(f Frame, c *Client) {
 	switch f.Type {
-	case "playbackPostion":
+	case "playbackPosition":
 		data := f.Data.(map[string]interface{})
 
-		position := data["position"].(int)
+		position := data["position"].(float64)
 		currentTime := data["currentTime"].(string)
-		log.Printf("Room: %s, playback: %d, at: %s", c.room.ID, position, currentTime)
 
 		sFrame := f
 		sFrame.From = "server"
