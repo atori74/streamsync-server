@@ -2,16 +2,7 @@ package main
 
 import (
 	"log"
-	"net/http"
 )
-
-func topHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.Error(w, "Not Found", http.StatusNotFound)
-		return
-	}
-	http.ServeFile(w, r, "top.html")
-}
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)

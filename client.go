@@ -29,9 +29,10 @@ const (
 )
 
 type Client struct {
-	room *Room
-	conn *websocket.Conn
-	send chan []byte
+	room   *Room
+	conn   *websocket.Conn
+	send   chan []byte
+	inSync bool
 }
 
 func (c *Client) reader() {
@@ -117,12 +118,42 @@ func (c *Client) hostReader() {
 		}
 		var f Frame
 		json.Unmarshal(message, &f)
-		j, err := json.Marshal(&f)
+
+		// frameを使って何かする
+		// handleFrame(f)
+	}
+}
+
+func handleFrame(f Frame, c *Client) {
+	switch f.Type {
+	case "playbackPostion":
+		position := f.Data["position"]
+		currentTime := f.Data["currentTime"]
+
+		sFrame := f
+		sFrame.From = "server"
+
+		b, err := json.Marshal(sFrame)
 		if err != nil {
-			log.Println("failed to traverse ws frame from host")
-			continue
+			log.Println(err)
+			return
 		}
-		c.room.broadcast <- j
+
+		c.room.broadcast <- b
+
+	case "command":
+		switch f.Data["command"] {
+		case "syncStart":
+			if c.inSync {
+				return
+			}
+			//hoge
+		case "syncStop":
+			if !c.inSync {
+				return
+			}
+			//hoge
+		}
 	}
 }
 
