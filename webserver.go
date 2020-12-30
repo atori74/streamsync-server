@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 
 	"github.com/gorilla/mux"
@@ -28,9 +29,25 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	// CheckOriginメソッドでchrome拡張のoriginを許可する必要あり
-	// CheckOrigin: func(r *http.Request) {
-	// 	return false
-	// },
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header["Origin"]
+		if len(origin) == 0 {
+			return true
+		}
+
+		u, err := url.Parse(origin[0])
+		if err != nil {
+			return false
+		}
+		switch u.Host {
+		case r.Host:
+			return true
+		case "mlkcalakglmhbbogogidckljebnaeipb":
+			return true
+		default:
+			return false
+		}
+	},
 }
 
 func newRoomHandler(w http.ResponseWriter, r *http.Request) {
