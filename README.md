@@ -16,3 +16,7 @@ Clients in the same room receive the data and automatically sync the playback po
 
 Host and Client have websocket connection with server as long as they are in the room.
 
+### Related Repository
+
+**[atori74/streamsync](https://github.com/atori74/streamsync)**  
+chrome extension as clientside application
