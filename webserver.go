@@ -42,7 +42,9 @@ var upgrader = websocket.Upgrader{
 		switch u.Host {
 		case r.Host:
 			return true
-		case "mlkcalakglmhbbogogidckljebnaeipb":
+		case "mlkcalakglmhbbogogidckljebnaeipb": // Test environment
+			return true
+		case "honmbceijbfoniffckiolgkgaieikenk": // Test environment
 			return true
 		default:
 			return false
