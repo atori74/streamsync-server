@@ -4,3 +4,5 @@
 # test client
 /top.html
 
+# docker-compose
+/docker-compose.yml
