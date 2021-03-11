@@ -203,6 +203,28 @@ func handleFrame(f Frame, c *Client) {
 				c.send <- b
 			}
 		}
+	case "message":
+		data := f.Data.(map[string]interface{})
+
+		content, ok := data["content"].(string)
+		if !ok {
+			log.Println("invalid frame")
+			return
+		}
+
+		sFrame := Frame{
+			Type: "message",
+			From: "client",
+			Data: content,
+		}
+
+		b, err := json.Marshal(sFrame)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		c.room.broadcast <- b
 	}
 }
 
