@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 
 	"github.com/gorilla/mux"
@@ -18,9 +19,25 @@ func startWebServer() error {
 	r.HandleFunc("/new", newRoomHandler)
 	r.HandleFunc("/join/{room_id}", joinRoomHandler)
 	r.HandleFunc("/top", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "top.html")
+		http.ServeFile(w, r, "./static/top.html")
 	})
-	return http.ListenAndServe(":8889", r)
+	r.Use(loggingMiddleware)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+		log.Printf("defaulting to port %s", port)
+	}
+
+	log.Printf("listening on port %s", port)
+	return http.ListenAndServe(":"+port, r)
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Println("[Request]", r.RequestURI)
+		next.ServeHTTP(w, r)
+	})
 }
 
 var openRooms = make(map[string]*Room)
