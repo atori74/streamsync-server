@@ -52,6 +52,13 @@ var upgrader = websocket.Upgrader{
 			return true
 		}
 
+		mode := os.Getenv("APP_ENV")
+		if mode == "develop" {
+			allowAll = true
+		} else {
+			allowAll = false
+		}
+
 		u, err := url.Parse(origin[0])
 		if err != nil {
 			return false
@@ -64,7 +71,7 @@ var upgrader = websocket.Upgrader{
 		case "honmbceijbfoniffckiolgkgaieikenk": // Test environment
 			return true
 		default:
-			return false
+			return allowAll
 		}
 	},
 }
