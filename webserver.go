@@ -53,6 +53,7 @@ var upgrader = websocket.Upgrader{
 		}
 
 		mode := os.Getenv("APP_ENV")
+		var allowAll bool
 		if mode == "develop" {
 			allowAll = true
 		} else {
