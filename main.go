@@ -5,7 +5,7 @@ import (
 )
 
 func main() {
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	log.SetFlags(log.Ldate | log.Lmicroseconds | log.Lshortfile)
 
 	log.Println(startWebServer())
 
