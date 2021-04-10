@@ -165,6 +165,39 @@ func handleFrame(f Frame, c *Client) {
 	case "command":
 		if cmd, ok := f.Data.(map[string]interface{})["command"].(string); ok {
 			switch cmd {
+			case "pause":
+				data := f.Data.(map[string]interface{})
+
+				_, ok := data["position"].(float64)
+				if !ok {
+					log.Println("invalid frame")
+					return
+				}
+				_, ok = data["mediaURL"].(string)
+				if !ok {
+					log.Println("invalid frame")
+					return
+				}
+
+				sFrame := f
+
+				b, err := json.Marshal(sFrame)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				c.room.broadcast <- b
+			case "play":
+				sFrame := f
+
+				b, err := json.Marshal(sFrame)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				c.room.broadcast <- b
 			case "syncStart":
 				if c.inSync {
 					return
