@@ -1,4 +1,4 @@
-package main
+package frame
 
 type Frame struct {
 	Type string      `json:"type"`
