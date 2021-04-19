@@ -18,6 +18,10 @@ Clients in the same room receive the data and automatically sync the playback po
 
 Host and Client have websocket connection with server as long as they are in the room.
 
+### Architecture
+
+![streamsync-architecture](https://user-images.githubusercontent.com/36187588/115284798-1a12dc80-a188-11eb-9105-2883d00cdc8d.png)
+
 ### Related Repository
 
 **[atori74/streamsync](https://github.com/atori74/streamsync)**  
