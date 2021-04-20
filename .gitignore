@@ -2,7 +2,7 @@
 /stream_sync
 
 # test client
-/top.html
+/static/
 
 # docker-compose
 /docker-compose.yml
