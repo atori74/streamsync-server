@@ -313,7 +313,7 @@ func hostMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
 			return
 		}
 		mURL, err := rdb.HGet(ctx, c.RoomID, "mediaURL").Result()
-		if err != nil {
+		if err != nil && err != redis.Nil {
 			log.Println(err)
 		} else if err == redis.Nil || mURL != url {
 			err := rdb.HSet(ctx, c.RoomID, "mediaURL", url)
