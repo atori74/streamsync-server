@@ -19,7 +19,12 @@ func loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func startWebServer() error {
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	redisAddr := os.Getenv("REDIS")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+		log.Printf("defaulting redis address to %s", redisAddr)
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 
 	r := mux.NewRouter().StrictSlash(true)
 
