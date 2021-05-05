@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"stream_sync/api"
 
 	"log"
 	"net/http"
 	"os"
 
+	"cloud.google.com/go/pubsub"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 )
@@ -26,10 +29,20 @@ func startWebServer() error {
 	}
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 
+	projectID := os.Getenv("GCP_PROJECT_ID")
+	if projectID == "" {
+		return errors.New("No GCP_PROJECT_ID is set in environment variables")
+	}
+	ctx := context.TODO()
+	psc, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		return err
+	}
+
 	r := mux.NewRouter().StrictSlash(true)
 
-	r.HandleFunc("/new", api.H(rdb, api.NewRoomHandler))
-	r.HandleFunc("/join/{room_id}", api.H(rdb, api.JoinRoomHandler))
+	r.HandleFunc("/new", api.H(rdb, psc, api.NewRoomHandler))
+	r.HandleFunc("/join/{room_id}", api.H(rdb, psc, api.JoinRoomHandler))
 	r.HandleFunc("/top", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./static/top.html")
 	})

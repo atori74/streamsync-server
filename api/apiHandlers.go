@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"time"
 
+	"cloud.google.com/go/pubsub"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -69,7 +70,7 @@ var upgrader = websocket.Upgrader{
 			return true
 		case "mlkcalakglmhbbogogidckljebnaeipb": // Test environment
 			return true
-		case "honmbceijbfoniffckiolgkgaieikenk": // Test environment
+		case "honmbceijbf.com/go/pubsuboniffckiolgkgaieikenk": // Test environment
 			return true
 		default:
 			return allowAll
@@ -77,13 +78,13 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-func H(rdb *redis.Client, fn func(http.ResponseWriter, *http.Request, *redis.Client)) func(http.ResponseWriter, *http.Request) {
+func H(rdb *redis.Client, psc *pubsub.Client, fn func(http.ResponseWriter, *http.Request, *redis.Client, *pubsub.Client)) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		fn(w, r, rdb)
+		fn(w, r, rdb, psc)
 	}
 }
 
-func NewRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client) {
+func NewRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client, psc *pubsub.Client) {
 	if r.URL.Path != "/new" {
 		// error response
 		wsError(w, "bad url", http.StatusNotFound)
@@ -102,17 +103,19 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client) {
 	ctx := context.TODO()
 
 	// initialize Host
-	host, err := client.HostRoom(rdb, ctx)
+	host, err := client.HostRoom(rdb, psc, ctx)
 	if err != nil {
 		conn.Close() //?
 		wsError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	log.Println("initializing host is complete")
+
 	// websocket writer
 	go writer(conn, host)
 	// websocket reader
-	go reader(conn, host, rdb, hostMessageHandler)
+	go reader(conn, host, rdb, psc, hostMessageHandler)
 
 	f := frame.Frame{
 		From: "server",
@@ -129,7 +132,7 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client) {
 	host.Send <- j
 }
 
-func JoinRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client) {
+func JoinRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client, psc *pubsub.Client) {
 	log.Println("joinRoomHandler called")
 
 	validPath := regexp.MustCompile(`^/join/[0-9a-zA-Z]+$`)
@@ -165,7 +168,7 @@ func JoinRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client) 
 		return
 	}
 
-	client, err := client.JoinRoom(rdb, ctx, rid)
+	client, err := client.JoinRoom(rdb, psc, ctx, rid)
 	if err != nil {
 		conn.Close()
 		wsError(w, err.Error(), http.StatusInternalServerError)
@@ -173,7 +176,7 @@ func JoinRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client) 
 	}
 
 	// websocket reader
-	go reader(conn, client, rdb, clientMessageHandler)
+	go reader(conn, client, rdb, psc, clientMessageHandler)
 	// websocket writer
 	go writer(conn, client)
 
@@ -198,7 +201,7 @@ func JoinRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client) 
 	client.Send <- j
 }
 
-func reader(conn *websocket.Conn, client *client.Client, rdb *redis.Client, handler func(*frame.Frame, *redis.Client, *client.Client)) {
+func reader(conn *websocket.Conn, client *client.Client, rdb *redis.Client, psc *pubsub.Client, handler func(*frame.Frame, *redis.Client, *pubsub.Client, *client.Client)) {
 	defer func() {
 		conn.Close()
 		client.Unsubscribe()
@@ -210,7 +213,10 @@ func reader(conn *websocket.Conn, client *client.Client, rdb *redis.Client, hand
 			if err := rdb.Unlink(ctx, client.RoomID).Err(); err != nil {
 				log.Println(err)
 			}
-			if err := rdb.Publish(ctx, client.RoomID, "CLOSE").Err(); err != nil {
+			if err := publishMessage(ctx, psc, client.RoomID, "CLOSE"); err != nil {
+				log.Println(err)
+			}
+			if err := psc.Topic(client.RoomID).Delete(ctx); err != nil {
 				log.Println(err)
 			}
 		} else {
@@ -242,7 +248,7 @@ func reader(conn *websocket.Conn, client *client.Client, rdb *redis.Client, hand
 			var f frame.Frame
 			json.Unmarshal(message, &f)
 
-			handler(&f, rdb, client)
+			handler(&f, rdb, psc, client)
 		}
 	}
 }
@@ -289,7 +295,7 @@ func writer(conn *websocket.Conn, client *client.Client) {
 // TODO HOST websocket message handling
 // redisにpublishしてから個々のgoroutineでフィルタリングするのはリソースの無駄なので
 // 基本的にこのタイミングで前処理は終わらせる
-func hostMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
+func hostMessageHandler(f *frame.Frame, rdb *redis.Client, psc *pubsub.Client, c *client.Client) {
 	ctx := context.TODO()
 	switch f.Type {
 	case "playbackPosition":
@@ -332,7 +338,9 @@ func hostMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
 		}
 
 		// broadcastする代わりにredisにpublishする
-		err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+		// redisにpublishするかわりにcloud pub/subのRoomIDトピックにpublishする
+		// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+		err = publishMessage(ctx, psc, c.RoomID, string(b))
 		if err != nil {
 			log.Println(err)
 			return
@@ -363,7 +371,8 @@ func hostMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
 				}
 
 				// broadcastする代わりにredisにpublishする
-				err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+				// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+				err = publishMessage(ctx, psc, c.RoomID, string(b))
 				if err != nil {
 					log.Println(err)
 					return
@@ -379,7 +388,8 @@ func hostMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
 
 				// broadcastする代わりにredisにpublishする
 				ctx := context.Background()
-				err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+				// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+				err = publishMessage(ctx, psc, c.RoomID, string(b))
 				if err != nil {
 					log.Println(err)
 					return
@@ -448,7 +458,8 @@ func hostMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
 		}
 
 		// broadcastする代わりにredisにpublishする
-		err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+		// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+		err = publishMessage(ctx, psc, c.RoomID, string(b))
 		if err != nil {
 			log.Println(err)
 			return
@@ -457,7 +468,7 @@ func hostMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
 }
 
 // TODO HOST websocket message handling
-func clientMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
+func clientMessageHandler(f *frame.Frame, rdb *redis.Client, psc *pubsub.Client, c *client.Client) {
 	ctx := context.TODO()
 	switch f.Type {
 	// case "command":
@@ -527,12 +538,25 @@ func clientMessageHandler(f *frame.Frame, rdb *redis.Client, c *client.Client) {
 		}
 
 		// broadcastする代わりにredisにpublishする
-		err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+		// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
+		err = publishMessage(ctx, psc, c.RoomID, string(b))
 		if err != nil {
 			log.Println(err)
 			return
 		}
 	}
+}
+
+func publishMessage(ctx context.Context, client *pubsub.Client, topicID, msg string) error {
+	t := client.Topic(topicID)
+	result := t.Publish(ctx, &pubsub.Message{
+		Data: []byte(msg),
+	})
+	_, err := result.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("Get: %v", err)
+	}
+	return nil
 }
 
 func wsError(w http.ResponseWriter, msg string, code int) {

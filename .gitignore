@@ -6,3 +6,5 @@
 
 # docker-compose
 /docker-compose.yml
+
+/gcp-account.json
