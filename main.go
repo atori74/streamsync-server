@@ -5,5 +5,5 @@ import "log"
 func main() {
 	log.SetFlags(log.Ldate | log.Lmicroseconds | log.Lshortfile)
 
-	log.Panicln(startWebServer())
+	log.Panicln(startWebserver())
 }
