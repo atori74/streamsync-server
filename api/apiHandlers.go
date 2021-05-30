@@ -9,9 +9,34 @@ import (
 	"os"
 	"time"
 
+	"cloud.google.com/go/datastore"
+	"cloud.google.com/go/pubsub"
 	"github.com/gorilla/websocket"
 	"github.com/rs/xid"
 )
+
+var dsClient *datastore.Client
+var psClient *pubsub.Client
+
+func init() {
+	projectID := os.Getenv("GCP_PROJECT_ID")
+	if projectID == "" {
+		panic("no project-id in env variables")
+	}
+
+	ctx := context.Background()
+	dsc, err := datastore.NewClient(ctx, projectID)
+	if err != nil {
+		panic("failed to initialize datastore client")
+	}
+	dsClient = dsc
+
+	psc, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		panic("failed to initialize pubsub client")
+	}
+	psClient = psc
+}
 
 var (
 	newline = []byte{'\n'}
@@ -67,6 +92,12 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+type Frame struct {
+	Type string      `json:"type"`
+	From string      `json:"from"`
+	Data interface{} `json:"data"`
+}
+
 type wsResult struct {
 	err error
 	msg Frame
@@ -91,11 +122,21 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 	wsReadCh := readWebsocket(ctx, conn)
 	wsWriteCh := make(chan []byte)
 	writeWebsocket(ctx, wsWriteCh, conn)
+	publishCh := make(chan []byte)
+	err = registerPublisher(ctx, publishCh, roomID)
+	if err != nil {
+		log.Println(err)
+		close(wsWriteCh)
+		close(publishCh)
+		http.Error(w, "pubsub init error", http.StatusInternalServerError)
+		return
+	}
 
 	go func() {
 		defer func() {
 			log.Printf("%s is closed", roomID)
 			close(wsWriteCh)
+			close(publishCh)
 		}()
 
 		for {
@@ -112,6 +153,7 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				wsWriteCh <- b
+				publishCh <- b
 			}
 		}
 	}()
@@ -135,10 +177,37 @@ func JoinRoomHandler(w http.ResponseWriter, r *http.Request) {
 	// hoge
 }
 
-type Frame struct {
-	Type string      `json:"type"`
-	From string      `json:"from"`
-	Data interface{} `json:"data"`
+func registerPublisher(ctx context.Context, ch <-chan []byte, roomID string) error {
+	topic, err := getTopic(ctx, roomID)
+	if err != nil {
+		return err
+	}
+
+	publishCh := make(chan []byte)
+
+	go func() {
+		for msg := range publishCh {
+			topic.Publish(context.Background(), &pubsub.Message{Data: msg})
+		}
+	}()
+
+	go func() {
+		defer close(publishCh)
+		defer func() {
+			if err := topic.Delete(context.Background()); err != nil {
+				log.Println(err)
+			}
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case publishCh <- <-ch:
+			}
+		}
+	}()
+
+	return nil
 }
 
 func readWebsocket(ctx context.Context, conn *websocket.Conn) <-chan wsResult {
@@ -212,4 +281,19 @@ func writeWebsocket(ctx context.Context, ch chan []byte, conn *websocket.Conn) {
 			}
 		}
 	}()
+}
+
+func getTopic(ctx context.Context, topicID string) (*pubsub.Topic, error) {
+	topic := psClient.Topic(topicID)
+	ok, err := topic.Exists(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		topic, err = psClient.CreateTopic(context.Background(), topicID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return topic, nil
 }
