@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/datastore"
@@ -103,6 +104,11 @@ type wsResult struct {
 	msg Frame
 }
 
+type subResult struct {
+	err error
+	msg []byte
+}
+
 func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/new" {
 		// error response
@@ -119,16 +125,20 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 	roomID := xid.New().String()
 
 	ctx, cancel := context.WithCancel(context.Background())
+
 	wsReadCh := readWebsocket(ctx, conn)
 	wsWriteCh := make(chan []byte)
 	writeWebsocket(ctx, wsWriteCh, conn)
+
+	var mu sync.Mutex
+	subscribeCh := subscribe(ctx, roomID, &mu)
 	publishCh := make(chan []byte)
-	err = registerPublisher(ctx, publishCh, roomID)
+	err = registerPublisher(ctx, publishCh, roomID, &mu)
 	if err != nil {
 		log.Println(err)
+		cancel()
 		close(wsWriteCh)
 		close(publishCh)
-		http.Error(w, "pubsub init error", http.StatusInternalServerError)
 		return
 	}
 
@@ -152,8 +162,13 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 					log.Println(err)
 					continue
 				}
-				wsWriteCh <- b
 				publishCh <- b
+			case res := <-subscribeCh:
+				if res.err != nil {
+					cancel()
+					return
+				}
+				wsWriteCh <- res.msg
 			}
 		}
 	}()
@@ -177,9 +192,43 @@ func JoinRoomHandler(w http.ResponseWriter, r *http.Request) {
 	// hoge
 }
 
-func registerPublisher(ctx context.Context, ch <-chan []byte, roomID string) error {
+func subscribe(ctx context.Context, roomID string, mu *sync.Mutex) <-chan subResult {
+	subCh := make(chan subResult)
+	go func() {
+		defer close(subCh)
+		mu.Lock()
+		topic, err := getTopic(ctx, roomID)
+		mu.Unlock()
+		if err != nil {
+			subCh <- subResult{err: err, msg: nil}
+			return
+		}
+		sub, err := psClient.CreateSubscription(ctx, xid.New().String(), pubsub.SubscriptionConfig{
+			Topic: topic,
+		})
+		if err != nil {
+			subCh <- subResult{err: err, msg: nil}
+			return
+		}
+
+		err = sub.Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
+			subCh <- subResult{err: nil, msg: m.Data}
+			m.Ack()
+		})
+		if err != nil {
+			subCh <- subResult{err: err, msg: nil}
+		}
+	}()
+	return subCh
+}
+
+func registerPublisher(ctx context.Context, ch <-chan []byte, roomID string, mu *sync.Mutex) error {
+	// pretty long blocking
+	mu.Lock()
 	topic, err := getTopic(ctx, roomID)
+	mu.Unlock()
 	if err != nil {
+		_ = topic.Delete(context.Background())
 		return err
 	}
 
@@ -192,8 +241,8 @@ func registerPublisher(ctx context.Context, ch <-chan []byte, roomID string) err
 	}()
 
 	go func() {
-		defer close(publishCh)
 		defer func() {
+			close(publishCh)
 			if err := topic.Delete(context.Background()); err != nil {
 				log.Println(err)
 			}
@@ -206,7 +255,6 @@ func registerPublisher(ctx context.Context, ch <-chan []byte, roomID string) err
 			}
 		}
 	}()
-
 	return nil
 }
 
