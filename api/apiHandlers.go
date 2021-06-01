@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
 	"cloud.google.com/go/datastore"
 	"cloud.google.com/go/pubsub"
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/rs/xid"
 )
@@ -173,6 +175,8 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	rooms[roomID] = &Room{}
+
 	f := Frame{
 		From: "server",
 		Type: "joinSuccess",
@@ -188,8 +192,105 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 	wsWriteCh <- b
 }
 
+var rooms map[string]*Room = make(map[string]*Room)
+
+type Room struct {
+	clientCount int
+	mediaURL    string
+}
+
 func JoinRoomHandler(w http.ResponseWriter, r *http.Request) {
-	// hoge
+	validPath := regexp.MustCompile(`^/join/[0-9a-zA-Z]+$`)
+	m := validPath.FindStringSubmatch(r.URL.Path)
+	if len(m) == 0 {
+		http.Error(w, "invalid url", http.StatusNotFound)
+		return
+	}
+
+	roomID, ok := mux.Vars(r)["room_id"]
+	if !ok {
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	// find the room in datastore
+	room, ok := rooms[roomID]
+	if !ok {
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		http.Error(w, "failed to upgrade websocket", http.StatusInternalServerError)
+		return
+	}
+
+	// increment client count of the room in datastore
+	room.clientCount += 1
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	wsReadCh := readWebsocket(ctx, conn)
+	wsWriteCh := make(chan []byte)
+	writeWebsocket(ctx, wsWriteCh, conn)
+
+	var mu sync.Mutex
+	subscribeCh := subscribe(ctx, roomID, &mu)
+	publishCh := make(chan []byte)
+	err = registerPublisher(ctx, publishCh, roomID, &mu)
+	if err != nil {
+		log.Println(err)
+		cancel()
+		close(wsWriteCh)
+		close(publishCh)
+		return
+	}
+
+	go func() {
+		defer func() {
+			log.Printf("someone leaved %s", roomID)
+			close(wsWriteCh)
+			close(publishCh)
+		}()
+
+		for {
+			select {
+			case res := <-wsReadCh:
+				if res.err != nil {
+					cancel()
+					return
+				}
+				b, err := json.Marshal(res.msg)
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+				publishCh <- b
+			case res := <-subscribeCh:
+				if res.err != nil {
+					cancel()
+					return
+				}
+				wsWriteCh <- res.msg
+			}
+		}
+	}()
+
+	f := Frame{
+		From: "server",
+		Type: "joinSuccess",
+		Data: map[string]interface{}{
+			"roomID":   roomID,
+			"mediaURL": "",
+		},
+	}
+	b, err := json.Marshal(f)
+	if err != nil {
+		log.Println(err)
+	}
+
+	wsWriteCh <- b
 }
 
 func subscribe(ctx context.Context, roomID string, mu *sync.Mutex) <-chan subResult {
