@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -179,10 +180,9 @@ func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 
 	f := Frame{
 		From: "server",
-		Type: "joinSuccess",
+		Type: "roomInfo",
 		Data: map[string]interface{}{
-			"roomID":   roomID,
-			"mediaURL": "",
+			"roomID": roomID,
 		},
 	}
 	b, err := json.Marshal(f)
@@ -323,7 +323,22 @@ func subscribe(ctx context.Context, roomID string, mu *sync.Mutex) <-chan subRes
 	return subCh
 }
 
+type pubRegister struct {
+	ctx context.Context
+	ch  <-chan []byte
+}
+
+var publishers map[string]chan pubRegister = make(map[string]chan pubRegister)
+
 func registerPublisher(ctx context.Context, ch <-chan []byte, roomID string, mu *sync.Mutex) error {
+	if rch, ok := publishers[roomID]; ok {
+		fmt.Println("multiplex new ch in publisher")
+		rch <- pubRegister{ctx: ctx, ch: ch}
+		return nil
+	}
+
+	fmt.Println("new publisher")
+
 	// pretty long blocking
 	mu.Lock()
 	topic, err := getTopic(ctx, roomID)
@@ -334,28 +349,51 @@ func registerPublisher(ctx context.Context, ch <-chan []byte, roomID string, mu 
 	}
 
 	publishCh := make(chan []byte)
+	registerCh := make(chan pubRegister)
+	publishers[roomID] = registerCh
 
+	var wg sync.WaitGroup
+	multiplex := func(ctx context.Context, c <-chan []byte) {
+		defer wg.Done()
+		for i := range c {
+			select {
+			case <-ctx.Done():
+				return
+			case publishCh <- i:
+			}
+		}
+	}
+
+	// initial ch
+	wg.Add(1)
+	go multiplex(ctx, ch)
+
+	// main publisher
 	go func() {
 		for msg := range publishCh {
 			topic.Publish(context.Background(), &pubsub.Message{Data: msg})
 		}
 	}()
 
+	// add ch for publishing
 	go func() {
-		defer func() {
-			close(publishCh)
-			if err := topic.Delete(context.Background()); err != nil {
-				log.Println(err)
-			}
-		}()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case publishCh <- <-ch:
-			}
+		for r := range registerCh {
+			wg.Add(1)
+			go multiplex(r.ctx, r.ch)
 		}
 	}()
+
+	// wait until all channels for publishing  get closed
+	go func() {
+		wg.Wait()
+		delete(publishers, roomID)
+		close(registerCh)
+		close(publishCh)
+		if err := topic.Delete(context.Background()); err != nil {
+			log.Println(err)
+		}
+	}()
+
 	return nil
 }
 
