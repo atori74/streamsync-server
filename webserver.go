@@ -1,13 +1,12 @@
 package main
 
 import (
-	"stream_sync/api"
-
 	"log"
 	"net/http"
 	"os"
 
-	"github.com/go-redis/redis/v8"
+	"streamsync-server/api"
+
 	"github.com/gorilla/mux"
 )
 
@@ -18,18 +17,11 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func startWebServer() error {
-	redisAddr := os.Getenv("REDIS")
-	if redisAddr == "" {
-		redisAddr = "localhost:6379"
-		log.Printf("defaulting redis address to %s", redisAddr)
-	}
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
-
+func startWebserver() error {
 	r := mux.NewRouter().StrictSlash(true)
 
-	r.HandleFunc("/new", api.H(rdb, api.NewRoomHandler))
-	r.HandleFunc("/join/{room_id}", api.H(rdb, api.JoinRoomHandler))
+	r.HandleFunc("/new", api.NewRoomHandler)
+	r.HandleFunc("/join/{room_id}", api.JoinRoomHandler)
 	r.HandleFunc("/top", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./static/top.html")
 	})
