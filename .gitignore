@@ -1,2 +1,7 @@
 /streamsync-server
 
+/static/
+
+/docker-compose.yml
+
+/gcp-account.json

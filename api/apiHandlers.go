@@ -31,6 +31,7 @@ func init() {
 	ctx := context.Background()
 	dsc, err := NewDatastore(projectID)
 	if err != nil {
+		fmt.Println(err)
 		panic("failed to initialize datastore client")
 	}
 	dsClient = dsc
@@ -337,7 +338,7 @@ func JoinRoomHandler(w http.ResponseWriter, r *http.Request) {
 		Type: "joinSuccess",
 		Data: map[string]interface{}{
 			"roomID":   roomID,
-			"mediaURL": "",
+			"mediaURL": room.MediaURL,
 		},
 	}
 	b, err := json.Marshal(f)
@@ -351,7 +352,11 @@ func JoinRoomHandler(w http.ResponseWriter, r *http.Request) {
 func subscribe(ctx context.Context, roomID string, mu *sync.Mutex) <-chan subResult {
 	subCh := make(chan subResult)
 	go func() {
-		defer close(subCh)
+		var sub *pubsub.Subscription
+		defer func() {
+			close(subCh)
+			_ = sub.Delete(context.Background())
+		}()
 		mu.Lock()
 		topic, err := getTopic(ctx, roomID)
 		mu.Unlock()
@@ -359,8 +364,10 @@ func subscribe(ctx context.Context, roomID string, mu *sync.Mutex) <-chan subRes
 			subCh <- subResult{err: err, msg: nil}
 			return
 		}
-		sub, err := psClient.CreateSubscription(ctx, xid.New().String(), pubsub.SubscriptionConfig{
-			Topic: topic,
+		sub, err = psClient.CreateSubscription(ctx, xid.New().String(), pubsub.SubscriptionConfig{
+			Topic:               topic,
+			RetainAckedMessages: false,
+			ExpirationPolicy:    time.Hour * 24,
 		})
 		if err != nil {
 			subCh <- subResult{err: err, msg: nil}
