@@ -1,8 +1,12 @@
+<<<<<<< HEAD
 # build file
 /stream_sync
+/streamsync-server
 
 # test client
-/top.html
+/static/
 
 # docker-compose
 /docker-compose.yml
+
+/gcp-account.json
