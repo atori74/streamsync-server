@@ -1,16 +1,12 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"stream_sync/api"
-
 	"log"
 	"net/http"
 	"os"
 
-	"cloud.google.com/go/pubsub"
-	"github.com/go-redis/redis/v8"
+	"streamsync-server/api"
+
 	"github.com/gorilla/mux"
 )
 
@@ -21,28 +17,11 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func startWebServer() error {
-	redisAddr := os.Getenv("REDIS")
-	if redisAddr == "" {
-		redisAddr = "localhost:6379"
-		log.Printf("defaulting redis address to %s", redisAddr)
-	}
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
-
-	projectID := os.Getenv("GCP_PROJECT_ID")
-	if projectID == "" {
-		return errors.New("No GCP_PROJECT_ID is set in environment variables")
-	}
-	ctx := context.TODO()
-	psc, err := pubsub.NewClient(ctx, projectID)
-	if err != nil {
-		return err
-	}
-
+func startWebserver() error {
 	r := mux.NewRouter().StrictSlash(true)
 
-	r.HandleFunc("/new", api.H(rdb, psc, api.NewRoomHandler))
-	r.HandleFunc("/join/{room_id}", api.H(rdb, psc, api.JoinRoomHandler))
+	r.HandleFunc("/new", api.NewRoomHandler)
+	r.HandleFunc("/join/{room_id}", api.JoinRoomHandler)
 	r.HandleFunc("/top", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./static/top.html")
 	})

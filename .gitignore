@@ -1,5 +1,7 @@
+<<<<<<< HEAD
 # build file
 /stream_sync
+/streamsync-server
 
 # test client
 /static/

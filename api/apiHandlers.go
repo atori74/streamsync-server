@@ -1,24 +1,47 @@
 package api
 
 import (
-	"stream_sync/client"
-	"stream_sync/frame"
-
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/pubsub"
-	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/rs/xid"
 )
+
+var dsClient *Datastore
+var psClient *pubsub.Client
+
+func init() {
+	projectID := os.Getenv("GCP_PROJECT_ID")
+	if projectID == "" {
+		panic("no project-id in env variables")
+	}
+
+	ctx := context.Background()
+	dsc, err := NewDatastore(projectID)
+	if err != nil {
+		fmt.Println(err)
+		panic("failed to initialize datastore client")
+	}
+	dsClient = dsc
+
+	psc, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		panic("failed to initialize pubsub client")
+	}
+	psClient = psc
+}
 
 var (
 	newline = []byte{'\n'}
@@ -37,10 +60,6 @@ const (
 
 	// Maximum message size allowed from peer.
 	maxMessageSize = 256
-)
-
-const (
-	roomsKey = "rooms"
 )
 
 var upgrader = websocket.Upgrader{
@@ -78,490 +97,568 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-func H(rdb *redis.Client, psc *pubsub.Client, fn func(http.ResponseWriter, *http.Request, *redis.Client, *pubsub.Client)) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		fn(w, r, rdb, psc)
-	}
+var ErrSubscriptionSkip = errors.New("Skip subscription message")
+var ErrRoomClosed = errors.New("The room was closed")
+
+type Frame struct {
+	Type string      `json:"type"`
+	From string      `json:"from"`
+	Data interface{} `json:"data"`
 }
 
-func NewRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client, psc *pubsub.Client) {
+type wsResult struct {
+	err error
+	msg Frame
+}
+
+type subResult struct {
+	err error
+	msg []byte
+}
+
+type room struct {
+	clientCount int
+	mediaURL    string
+}
+
+func (r *room) increment(i int) {
+	r.clientCount += i
+}
+
+func NewRoomHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/new" {
 		// error response
-		wsError(w, "bad url", http.StatusNotFound)
-		return
-	}
-
-	// upgrade websocket
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Println(err)
-		// error response
-		wsError(w, "failed to upgrade websocket", http.StatusInternalServerError)
-		return
-	}
-
-	ctx := context.TODO()
-
-	// initialize Host
-	host, err := client.HostRoom(rdb, psc, ctx)
-	if err != nil {
-		conn.Close() //?
-		wsError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	log.Println("initializing host is complete")
-
-	// websocket writer
-	go writer(conn, host)
-	// websocket reader
-	go reader(conn, host, rdb, psc, hostMessageHandler)
-
-	f := frame.Frame{
-		From: "server",
-		Type: "roomInfo",
-		Data: map[string]interface{}{
-			"roomID": host.RoomID,
-		},
-	}
-	j, err := json.Marshal(f)
-	if err != nil {
-		log.Println(err)
-	}
-
-	host.Send <- j
-}
-
-func JoinRoomHandler(w http.ResponseWriter, r *http.Request, rdb *redis.Client, psc *pubsub.Client) {
-	log.Println("joinRoomHandler called")
-
-	validPath := regexp.MustCompile(`^/join/[0-9a-zA-Z]+$`)
-	m := validPath.FindStringSubmatch(r.URL.Path)
-	if len(m) == 0 {
-		wsError(w, "invalid url", http.StatusNotFound)
-		return
-	}
-
-	rid, ok := mux.Vars(r)["room_id"]
-	if !ok {
-		wsError(w, "invalid room id", http.StatusBadRequest)
-		return
-	}
-
-	ctx := context.TODO()
-
-	// query room
-	exists, err := rdb.SIsMember(ctx, roomsKey, rid).Result()
-	if err != nil {
-		wsError(w, "redis error", http.StatusInternalServerError)
-		return
-	}
-	if !exists {
-		wsError(w, "invalid room id", http.StatusBadRequest)
+		http.Error(w, "bad url", http.StatusNotFound)
 		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		// error response
-		wsError(w, "failed to upgrade websocket", http.StatusInternalServerError)
+		http.Error(w, "failed to upgrade websocket", http.StatusInternalServerError)
 		return
 	}
 
-	client, err := client.JoinRoom(rdb, psc, ctx, rid)
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), "host", struct{}{}))
+
+	roomID := xid.New().String()
+
+	dsClient.Lock()
+	err = dsClient.Put(ctx, roomID, &Room{})
+	dsClient.Unlock()
 	if err != nil {
+		log.Println(err)
 		conn.Close()
-		wsError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// websocket reader
-	go reader(conn, client, rdb, psc, clientMessageHandler)
-	// websocket writer
-	go writer(conn, client)
+	wsReadCh := readWebsocket(ctx, conn)
+	wsWriteCh := make(chan []byte)
+	writeWebsocket(ctx, wsWriteCh, conn)
 
-	mediaURL, err := rdb.HGet(ctx, client.RoomID, "mediaURL").Result()
+	// TODO: Create topic
+
+	var mu sync.Mutex
+	subscribeCh := subscribe(ctx, roomID, &mu)
+	publishCh := make(chan []byte)
+	err = registerPublisher(ctx, publishCh, roomID, &mu)
 	if err != nil {
 		log.Println(err)
+		cancel()
+		close(wsWriteCh)
+		close(publishCh)
+		return
 	}
 
-	f := frame.Frame{
-		From: "server",
-		Type: "joinSuccess",
-		Data: map[string]interface{}{
-			"roomID":   client.RoomID,
-			"mediaURL": mediaURL,
-		},
-	}
-	j, err := json.Marshal(f)
-	if err != nil {
-		log.Println(err)
-	}
+	go func() {
+		defer func() {
+			log.Printf("%s is closed", roomID)
+			dsClient.Lock()
+			if err := dsClient.Delete(context.Background(), roomID); err != nil {
+				log.Println("failed to delete room in datastore")
+			}
+			dsClient.Unlock()
+			close(wsWriteCh)
+			close(publishCh)
+			// TODO: Delete topic
+		}()
 
-	client.Send <- j
-}
-
-func reader(conn *websocket.Conn, client *client.Client, rdb *redis.Client, psc *pubsub.Client, handler func(*frame.Frame, *redis.Client, *pubsub.Client, *client.Client)) {
-	defer func() {
-		conn.Close()
-		client.Unsubscribe()
-		ctx := context.TODO()
-		if client.IsHost {
-			if err := rdb.SRem(ctx, roomsKey, client.RoomID).Err(); err != nil {
-				log.Println(err)
-			}
-			if err := rdb.Unlink(ctx, client.RoomID).Err(); err != nil {
-				log.Println(err)
-			}
-			if err := publishMessage(ctx, psc, client.RoomID, "CLOSE"); err != nil {
-				log.Println(err)
-			}
-			if err := psc.Topic(client.RoomID).Delete(ctx); err != nil {
-				log.Println(err)
-			}
-		} else {
-			if e, err := rdb.Exists(ctx, client.RoomID).Result(); err != nil {
-				log.Println(err)
-			} else if e > 0 {
-				if err := rdb.HIncrBy(ctx, client.RoomID, "clients", -1).Err(); err != nil {
-					log.Println(err)
+		for {
+			select {
+			case res := <-wsReadCh:
+				if res.err != nil {
+					cancel()
+					return
 				}
+
+				b, err := hostWSHandler(&res.msg, roomID)
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+				publishCh <- b
+			case res := <-subscribeCh:
+				if res.err != nil {
+					cancel()
+					return
+				}
+
+				b, err := hostSubHandler(res.msg)
+				if err == ErrSubscriptionSkip {
+					continue
+				} else if err != nil {
+					log.Println(err)
+					continue
+				}
+				wsWriteCh <- b
 			}
 		}
 	}()
-	conn.SetReadLimit(maxMessageSize)
-	conn.SetReadDeadline(time.Now().Add(pongWait))
-	conn.SetPongHandler(func(string) error { conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
-	for {
-		select {
-		case <-client.Disconnect:
+
+	f := Frame{
+		From: "server",
+		Type: "roomInfo",
+		Data: map[string]interface{}{
+			"roomID": roomID,
+		},
+	}
+	b, err := json.Marshal(f)
+	if err != nil {
+		log.Println(err)
+	}
+	wsWriteCh <- b
+}
+
+func JoinRoomHandler(w http.ResponseWriter, r *http.Request) {
+	validPath := regexp.MustCompile(`^/join/[0-9a-zA-Z]+$`)
+	m := validPath.FindStringSubmatch(r.URL.Path)
+	if len(m) == 0 {
+		http.Error(w, "invalid url", http.StatusNotFound)
+		return
+	}
+
+	roomID, ok := mux.Vars(r)["room_id"]
+	if !ok {
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// find the room in datastore
+	dsClient.RLock()
+	room, err := dsClient.Get(ctx, roomID)
+	dsClient.RUnlock()
+	if err != nil {
+		log.Println(err)
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		http.Error(w, "failed to upgrade websocket", http.StatusInternalServerError)
+		return
+	}
+
+	// increment client count of the room in datastore
+	room.ClientCount += 1
+	dsClient.Lock()
+	err = dsClient.Mutate(ctx, roomID, room)
+	dsClient.Unlock()
+	if err != nil {
+		log.Println(err)
+		conn.Close()
+		return
+	}
+
+	wsReadCh := readWebsocket(ctx, conn)
+	wsWriteCh := make(chan []byte)
+	writeWebsocket(ctx, wsWriteCh, conn)
+
+	var mu sync.Mutex
+	subscribeCh := subscribe(ctx, roomID, &mu)
+	publishCh := make(chan []byte)
+	err = registerPublisher(ctx, publishCh, roomID, &mu)
+	if err != nil {
+		log.Println(err)
+		cancel()
+		close(wsWriteCh)
+		close(publishCh)
+		return
+	}
+
+	go func() {
+		defer func() {
+			dsClient.Lock()
+			room, err := dsClient.Get(context.Background(), roomID)
+			if err == nil {
+				room.ClientCount -= 1
+				dsClient.Mutate(context.Background(), roomID, room)
+			}
+			dsClient.Unlock()
+			close(wsWriteCh)
+			close(publishCh)
+		}()
+
+		for {
+			select {
+			case res := <-wsReadCh:
+				if res.err != nil {
+					cancel()
+					return
+				}
+
+				b, err := clientWSHandler(&res.msg)
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+				publishCh <- b
+			case res := <-subscribeCh:
+				if res.err != nil {
+					cancel()
+					return
+				}
+
+				b, err := clientSubHandler(res.msg)
+				if err == ErrRoomClosed {
+					cancel()
+					return
+				} else if err != nil {
+					log.Println(err)
+					continue
+				}
+				wsWriteCh <- b
+			}
+		}
+	}()
+
+	f := Frame{
+		From: "server",
+		Type: "joinSuccess",
+		Data: map[string]interface{}{
+			"roomID":   roomID,
+			"mediaURL": room.MediaURL,
+		},
+	}
+	b, err := json.Marshal(f)
+	if err != nil {
+		log.Println(err)
+	}
+
+	wsWriteCh <- b
+}
+
+func subscribe(ctx context.Context, roomID string, mu *sync.Mutex) <-chan subResult {
+	subCh := make(chan subResult)
+	go func() {
+		var sub *pubsub.Subscription
+		defer func() {
+			close(subCh)
+			_ = sub.Delete(context.Background())
+		}()
+		mu.Lock()
+		topic, err := getTopic(ctx, roomID)
+		mu.Unlock()
+		if err != nil {
+			subCh <- subResult{err: err, msg: nil}
 			return
-		default:
+		}
+		sub, err = psClient.CreateSubscription(ctx, xid.New().String(), pubsub.SubscriptionConfig{
+			Topic:               topic,
+			RetainAckedMessages: false,
+			ExpirationPolicy:    time.Hour * 24,
+		})
+		if err != nil {
+			subCh <- subResult{err: err, msg: nil}
+			return
+		}
+
+		err = sub.Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
+			subCh <- subResult{err: nil, msg: m.Data}
+			m.Ack()
+		})
+		if err != nil {
+			subCh <- subResult{err: err, msg: nil}
+		}
+	}()
+	return subCh
+}
+
+type pubRegister struct {
+	ctx context.Context
+	ch  <-chan []byte
+}
+
+var publishers map[string]chan pubRegister = make(map[string]chan pubRegister)
+
+func registerPublisher(ctx context.Context, ch <-chan []byte, roomID string, mu *sync.Mutex) error {
+	if rch, ok := publishers[roomID]; ok {
+		fmt.Println("multiplex new ch in publisher")
+		rch <- pubRegister{ctx: ctx, ch: ch}
+		return nil
+	}
+
+	fmt.Println("new publisher")
+
+	// pretty long blocking
+	mu.Lock()
+	topic, err := getTopic(ctx, roomID)
+	mu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	publishCh := make(chan []byte)
+	registerCh := make(chan pubRegister)
+	publishers[roomID] = registerCh
+
+	var wg sync.WaitGroup
+	multiplex := func(ctx context.Context, c <-chan []byte) {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				if ctx.Value("host") != nil {
+					publishCh <- []byte("CLOSE")
+				}
+				return
+			case i := <-c:
+				publishCh <- i
+			}
+		}
+	}
+
+	// initial ch
+	wg.Add(1)
+	go multiplex(ctx, ch)
+
+	// main publisher
+	go func() {
+		for msg := range publishCh {
+			topic.Publish(context.Background(), &pubsub.Message{Data: msg})
+		}
+	}()
+
+	// add ch for publishing
+	go func() {
+		for r := range registerCh {
+			wg.Add(1)
+			go multiplex(r.ctx, r.ch)
+		}
+	}()
+
+	// wait until all channels for publishing  get closed
+	go func() {
+		wg.Wait()
+		log.Println("this publisher is garbage now")
+		delete(publishers, roomID)
+		close(registerCh)
+		close(publishCh)
+	}()
+
+	return nil
+}
+
+func readWebsocket(ctx context.Context, conn *websocket.Conn) <-chan wsResult {
+	ch := make(chan wsResult)
+	go func() {
+		defer conn.Close()
+		conn.SetReadLimit(maxMessageSize)
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		conn.SetPongHandler(func(string) error { conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+		for {
 			_, message, err := conn.ReadMessage()
+			var f Frame
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					log.Printf("error: %v", err)
 				}
-				return
+			} else {
+				json.Unmarshal(message, &f)
 			}
 
-			var f frame.Frame
-			json.Unmarshal(message, &f)
-
-			handler(&f, rdb, psc, client)
+			result := wsResult{err: err, msg: f}
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- result:
+			}
 		}
-	}
-}
-
-func writer(conn *websocket.Conn, client *client.Client) {
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		conn.Close()
 	}()
-	for {
-		select {
-		case m, ok := <-client.Send:
-			conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			w, err := conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(m)
-
-			n := len(client.Send)
-			for i := 0; i < n; i++ {
-				w.Write(newline)
-				w.Write(<-client.Send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
-			}
-		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		}
-	}
+	return ch
 }
 
-// TODO HOST websocket message handling
-// redisにpublishしてから個々のgoroutineでフィルタリングするのはリソースの無駄なので
-// 基本的にこのタイミングで前処理は終わらせる
-func hostMessageHandler(f *frame.Frame, rdb *redis.Client, psc *pubsub.Client, c *client.Client) {
-	ctx := context.TODO()
-	switch f.Type {
+func writeWebsocket(ctx context.Context, ch chan []byte, conn *websocket.Conn) {
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer func() {
+			ticker.Stop()
+			conn.Close()
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-ch:
+				conn.SetWriteDeadline(time.Now().Add(writeWait))
+				if !ok {
+					conn.WriteMessage(websocket.CloseMessage, []byte{})
+					return
+				}
+
+				w, err := conn.NextWriter(websocket.TextMessage)
+				if err != nil {
+					return
+				}
+				w.Write(msg)
+
+				n := len(ch)
+				for i := 0; i < n; i++ {
+					w.Write(newline)
+					w.Write(<-ch)
+				}
+
+				if err := w.Close(); err != nil {
+					return
+				}
+			case <-ticker.C:
+				conn.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			}
+		}
+	}()
+}
+
+func getTopic(ctx context.Context, topicID string) (*pubsub.Topic, error) {
+	topic := psClient.Topic(topicID)
+	ok, err := topic.Exists(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		topic, err = psClient.CreateTopic(context.Background(), topicID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return topic, nil
+}
+
+func hostWSHandler(frame *Frame, roomID string) ([]byte, error) {
+	ctx := context.Background()
+	switch frame.Type {
 	case "playbackPosition":
-		data := f.Data.(map[string]interface{})
+		data := frame.Data.(map[string]interface{})
+		if _, ok := data["position"].(float64); !ok {
+			return nil, errors.New("invalid frame")
+		}
+		if _, ok := data["currentTime"].(string); !ok {
+			return nil, errors.New("invalid frame")
+		}
+		mediaURL, ok := data["mediaURL"].(string)
+		if !ok {
+			return nil, errors.New("invalid frame")
+		}
 
-		position, ok := data["position"].(float64)
-		if !ok {
-			log.Println("invalid frame")
-			return
-		}
-		currentTime, ok := data["currentTime"].(string)
-		if !ok {
-			log.Println("invalid frame")
-			return
-		}
-		log.Printf("roomID: %s, position: %f, at: %s\n", c.RoomID, position, currentTime)
-
-		url, ok := data["mediaURL"].(string)
-		if !ok {
-			log.Println("invalid frame")
-			return
-		}
-		mURL, err := rdb.HGet(ctx, c.RoomID, "mediaURL").Result()
-		if err != nil && err != redis.Nil {
-			log.Println(err)
-		} else if err == redis.Nil || mURL != url {
-			err := rdb.HSet(ctx, c.RoomID, "mediaURL", url)
-			if err != nil {
-				log.Println(err)
+		dsClient.Lock()
+		if room, err := dsClient.Get(ctx, roomID); err == nil {
+			if room.MediaURL == "" || room.MediaURL != mediaURL {
+				room.MediaURL = mediaURL
+				dsClient.Mutate(ctx, roomID, room)
 			}
+		} else {
+			log.Println("failed to update mediaURL: ", roomID)
 		}
+		dsClient.Unlock()
 
-		sFrame := f
-		sFrame.From = "server"
-
-		b, err := json.Marshal(sFrame)
+		frame.From = "server"
+		b, err := json.Marshal(frame)
 		if err != nil {
-			log.Println(err)
-			return
+			return nil, err
 		}
-
-		// broadcastする代わりにredisにpublishする
-		// redisにpublishするかわりにcloud pub/subのRoomIDトピックにpublishする
-		// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
-		err = publishMessage(ctx, psc, c.RoomID, string(b))
-		if err != nil {
-			log.Println(err)
-			return
-		}
+		return b, nil
 	case "command":
-		if cmd, ok := f.Data.(map[string]interface{})["command"].(string); ok {
-			switch cmd {
-			case "pause":
-				data := f.Data.(map[string]interface{})
-
-				_, ok := data["position"].(float64)
-				if !ok {
-					log.Println("invalid frame")
-					return
-				}
-				_, ok = data["mediaURL"].(string)
-				if !ok {
-					log.Println("invalid frame")
-					return
-				}
-
-				sFrame := f
-
-				b, err := json.Marshal(sFrame)
-				if err != nil {
-					log.Println(err)
-					return
-				}
-
-				// broadcastする代わりにredisにpublishする
-				// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
-				err = publishMessage(ctx, psc, c.RoomID, string(b))
-				if err != nil {
-					log.Println(err)
-					return
-				}
-			case "play":
-				sFrame := f
-
-				b, err := json.Marshal(sFrame)
-				if err != nil {
-					log.Println(err)
-					return
-				}
-
-				// broadcastする代わりにredisにpublishする
-				ctx := context.Background()
-				// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
-				err = publishMessage(ctx, psc, c.RoomID, string(b))
-				if err != nil {
-					log.Println(err)
-					return
-				}
-				// case "syncStart":
-				// 	if c.inSync {
-				// 		return
-				// 	}
-				// 	c.inSync = true
-
-				// 	sFrame := Frame{
-				// 		Type: "syncStarted",
-				// 		From: "server",
-				// 	}
-
-				// 	b, err := json.Marshal(sFrame)
-				// 	if err != nil {
-				// 		log.Println(err)
-				// 		return
-				// 	}
-
-				// 	c.send <- b
-				// case "syncStop":
-				// 	if !c.inSync {
-				// 		return
-				// 	}
-				// 	c.inSync = false
-
-				// 	sFrame := Frame{
-				// 		Type: "syncStopped",
-				// 		From: "server",
-				// 	}
-
-				// 	b, err := json.Marshal(sFrame)
-				// 	if err != nil {
-				// 		log.Println(err)
-				// 		return
-				// 	}
-
-				// 	c.send <- b
+		cmd, ok := frame.Data.(map[string]interface{})["command"].(string)
+		if !ok {
+			return nil, errors.New("invalid command frame")
+		}
+		switch cmd {
+		case "play":
+			b, err := json.Marshal(frame)
+			if err != nil {
+				return nil, err
 			}
+			return b, nil
+		case "pause":
+			data := frame.Data.(map[string]interface{})
+			if _, ok := data["position"].(float64); !ok {
+				return nil, errors.New("invalid pause frame")
+			}
+			if _, ok := data["mediaURL"].(string); !ok {
+				return nil, errors.New("invalid pause frame")
+			}
+
+			b, err := json.Marshal(frame)
+			if err != nil {
+				return nil, err
+			}
+			return b, nil
 		}
 	case "message":
-		data, ok := f.Data.(map[string]interface{})
+		msg, ok := frame.Data.(map[string]interface{})["content"].(string)
 		if !ok {
-			log.Println("invalid frame")
-			return
+			return nil, errors.New("invalid message frame")
 		}
 
-		content, ok := data["content"].(string)
-		if !ok {
-			log.Println("invalid frame")
-			return
-		}
-
-		sFrame := frame.Frame{
+		send := Frame{
 			Type: "message",
 			From: "host",
-			Data: content,
+			Data: msg,
 		}
 
-		b, err := json.Marshal(sFrame)
+		b, err := json.Marshal(send)
 		if err != nil {
-			log.Println(err)
-			return
+			return nil, err
 		}
-
-		// broadcastする代わりにredisにpublishする
-		// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
-		err = publishMessage(ctx, psc, c.RoomID, string(b))
-		if err != nil {
-			log.Println(err)
-			return
-		}
+		return b, nil
 	}
+	return nil, errors.New("invalid frame type")
 }
 
-// TODO HOST websocket message handling
-func clientMessageHandler(f *frame.Frame, rdb *redis.Client, psc *pubsub.Client, c *client.Client) {
-	ctx := context.TODO()
-	switch f.Type {
-	// case "command":
-	// 	if cmd, ok := f.Data.(map[string]interface{})["command"].(string); ok {
-	// 		switch cmd {
-	// 		case "syncStart":
-	// 			if c.inSync {
-	// 				return
-	// 			}
-	// 			c.inSync = true
+func hostSubHandler(msg []byte) ([]byte, error) {
+	return nil, ErrSubscriptionSkip
+}
 
-	// 			sFrame := Frame{
-	// 				Type: "syncStarted",
-	// 				From: "server",
-	// 			}
-
-	// 			b, err := json.Marshal(sFrame)
-	// 			if err != nil {
-	// 				log.Println(err)
-	// 				return
-	// 			}
-
-	// 			c.send <- b
-	// 		case "syncStop":
-	// 			if !c.inSync {
-	// 				return
-	// 			}
-	// 			c.inSync = false
-
-	// 			sFrame := Frame{
-	// 				Type: "syncStopped",
-	// 				From: "server",
-	// 			}
-
-	// 			b, err := json.Marshal(sFrame)
-	// 			if err != nil {
-	// 				log.Println(err)
-	// 				return
-	// 			}
-
-	// 			c.send <- b
-	// 		}
-	// 	}
+func clientWSHandler(frame *Frame) ([]byte, error) {
+	switch frame.Type {
 	case "message":
-		data, ok := f.Data.(map[string]interface{})
+		msg, ok := frame.Data.(map[string]interface{})["content"].(string)
 		if !ok {
-			log.Println("invalid frame")
-			return
+			return nil, errors.New("invalid message frame")
 		}
 
-		content, ok := data["content"].(string)
-		if !ok {
-			log.Println("invalid frame")
-			return
-		}
-
-		sFrame := frame.Frame{
+		send := Frame{
 			Type: "message",
 			From: "client",
-			Data: content,
+			Data: msg,
 		}
 
-		b, err := json.Marshal(sFrame)
+		b, err := json.Marshal(send)
 		if err != nil {
-			log.Println(err)
-			return
+			return nil, err
 		}
-
-		// broadcastする代わりにredisにpublishする
-		// err = rdb.Publish(ctx, c.RoomID, string(b)).Err()
-		err = publishMessage(ctx, psc, c.RoomID, string(b))
-		if err != nil {
-			log.Println(err)
-			return
-		}
+		return b, nil
 	}
+	return nil, errors.New("invalid frame type")
 }
 
-func publishMessage(ctx context.Context, client *pubsub.Client, topicID, msg string) error {
-	t := client.Topic(topicID)
-	result := t.Publish(ctx, &pubsub.Message{
-		Data: []byte(msg),
-	})
-	_, err := result.Get(ctx)
-	if err != nil {
-		return fmt.Errorf("Get: %v", err)
+func clientSubHandler(msg []byte) ([]byte, error) {
+	if string(msg) == "CLOSE" {
+		return nil, ErrRoomClosed
 	}
-	return nil
-}
-
-func wsError(w http.ResponseWriter, msg string, code int) {
-	log.Println("wsError: " + msg)
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(code)
-	fmt.Fprint(w, msg)
+	return msg, nil
 }
